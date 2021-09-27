@@ -1,14 +1,21 @@
 
 #define FASTLED_INTERRUPT_RETRY_COUNT 0 
 #define FASTLED_ALLOW_INTERRUPTS 0
+#include "constants.h"
+#include <ESP.h>
+
+#if defined(ESP8266)
+    #include <ESP8266WiFi.h>
+#elif defined(ESP32)
+    #include <WiFi.h>
+#endif
 #include <FastLED.h>
-#include <ESP8266WiFi.h>
 #include <WiFiUDP.h>
 #include "reactive_common.h"
 
 #define LED_PIN 2
 #define NUM_LEDS 144
-
+#define STATUS_CONNECTING CRGB::Orange
 #define MIC_LOW 0
 #define MIC_HIGH 644
 
@@ -19,9 +26,6 @@
 
 #define LAMP_ID 1
 WiFiUDP UDP;
-
-const char *ssid = "sound_reactive"; // The SSID (name) of the Wi-Fi network you want to connect to
-const char *password = "123456789";  // The password of the Wi-Fi network
 
 CRGB leds[NUM_LEDS];
 
@@ -39,14 +43,14 @@ struct led_command {
   uint8_t opmode;
   uint32_t data;
 };
-
+bool connected = false;
 unsigned long lastReceived = 0;
+uint32_t lastSubscribeTime = 0;
 unsigned long lastHeartBeatSent;
 const int heartBeatInterval = 100;
 bool fade = false;
 
 struct led_command cmd;
-void connectToWifi();
 
 void setup()
 {
@@ -64,36 +68,27 @@ void setup()
   delay(10);
   Serial.println('\n');
 
-  WiFi.begin(ssid, password); // Connect to the network
-  Serial.print("Connecting to ");
-  Serial.print(ssid);
-  Serial.println(" ...");
-
-  connectToWifi();
-  sendHeartBeat();
-  UDP.begin(7001);
+  connectToWiFi(NETWORK_SSID, NETWORK_PASSWORD);
 }
 
-void sendHeartBeat() {
-    struct heartbeat_message hbm;
-    hbm.client_id = LAMP_ID;
-    hbm.chk = 77777;
-    Serial.println("Sending heartbeat");
-    IPAddress ip(192,168,4,1);
-    UDP.beginPacket(ip, 7171); 
-    int ret = UDP.write((char*)&hbm,sizeof(hbm));
-    printf("Returned: %d, also sizeof hbm: %d \n", ret, sizeof(hbm));
-    UDP.endPacket();
-    lastHeartBeatSent = millis();
-}
 
 void loop()
 {
-  if (millis() - lastHeartBeatSent > heartBeatInterval) {
-    sendHeartBeat();
+
+
+  if (!connected) {
+    return;
   }
 
+  checkForNetworkFailure();
 
+  if (lastSubscribeTime == 0 || ms - lastSubscribeTime > SUBSCRIBE_INTERVAL_MS) {
+    for (uint8_t i = 0; i < STAGE_PROP_COUNT; i++) {
+      subscribe(STAGE_PROP_CODES[i], i);
+    }
+
+    lastSubscribeTime = ms;
+  }
   
   int packetSize = UDP.parsePacket();
   if (packetSize)
@@ -102,10 +97,6 @@ void loop()
     lastReceived = millis();
   }
 
-  if(millis() - lastReceived >= 5000)
-  {
-    connectToWifi();
-  }
     
   int opMode = cmd.opmode;
   int analogRaw = cmd.data;
@@ -233,30 +224,92 @@ void soundReactive(int analogRaw) {
   FastLED.show(); 
 }
 
-void connectToWifi() {
-   WiFi.mode(WIFI_STA);
+void showStatus(CRGB statusColor) {
+
   for (int i = 0; i < NUM_LEDS; i++)
   {
     leds[i] = CHSV(0, 0, 0);
   }
+  
   leds[0] = CRGB(0, 255, 0);
   FastLED.show();
-  
-  int i = 0;
-  while (WiFi.status() != WL_CONNECTED)
-  { // Wait for the Wi-Fi to connect
-    delay(1000);
-    Serial.print(++i);
-    Serial.print(' ');
-  }
-  Serial.println('\n');
-  Serial.println("Connection established!");
-  Serial.print("IP address:\t");
-  Serial.println(WiFi.localIP()); // Send the IP address of the ESP8266 to the computer
-  leds[0] = CRGB(0, 0, 255);
-  FastLED.show();
-  lastReceived = millis();
 }
+void checkForNetworkFailure() {
+  if (millis() - lastReceived > MAX_CONNECTION_LOSS_MS) {
+    Serial.println("No packets received in " + String(MAX_CONNECTION_LOSS_MS) + "ms, restarting.");
+    ESP.restart();
+    while (true);
+  }
+}
+
+void subscribe(String stagePropCode, uint8_t clientId) {
+  uint32_t ms = millis();
+
+  if (!udp.beginPacket(SERVER_IP_ADDRESS, SERVER_UDP_PORT)) {
+    Serial.println("beginPacket() failed.");
+    return;
+  }
+  udp.printf(String(SUBSCRIBE_COMMAND + stagePropCode + ":" + clientId).c_str());
+  udp.endPacket();
+}
+
+void receiveFrame() {
+  uint32_t ms = millis();
+
+  uint16_t packetSize = udp.parsePacket();
+  if (packetSize > 0) {
+    udp.read(packetBuffer, LED_BUFFER_SIZE);
+    adjustBrightness();
+    renderLeds(packetSize);
+    lastReceived = millis();
+  }
+}
+void connectToWiFi(const String ssid, const String pwd) {
+  Serial.println("Connecting to network: " + ssid + "...");
+  showStatus(STATUS_CONNECTING);
+
+  WiFi.disconnect(true);
+  WiFi.onEvent(onWiFiEvent);
+
+  #ifdef STATIC_IP_ADDRESS
+  if (WiFi.config(IPAddress(STATIC_IP_ADDRESS), IPAddress(ROUTER_IP_ADDRESS), IPAddress(SUBNET_MASK), IPAddress(DNS_PRIMARY), IPAddress(DNS_SECONDARY))) {
+    Serial.println("Using static IP address.");
+  } else {
+    Serial.println("Failed to configure static IP address.");
+  }
+  #else
+  Serial.println("Using dynamic IP address.");
+  #endif
+
+  WiFi.begin(ssid.c_str(), pwd.c_str());
+  Serial.println("Waiting for network connection...");
+}
+void onWiFiEvent(WiFiEvent_t event) {
+  switch (event) {
+    case EVENT_CONNECTED:
+      Serial.println("Connected to network.");
+      break;
+    case EVENT_GOT_IP:
+      if (WiFi.localIP() == IPAddress(0, 0, 0, 0)) {
+        Serial.println("Got IP Address of 0.0.0.0, waiting for proper IP address...");
+      } else {
+        
+          Serial.print("Connected with IP address ");
+          Serial.println(WiFi.localIP());
+          udp.begin(SERVER_UDP_PORT);
+          connected = true;
+          lastReceived = millis();
+        
+      }
+      break;
+    case EVENT_DISCONNECTED:
+      Serial.println("Lost network connection, attempting to reconnect...");
+      connected = false;
+      connectToWiFi(NETWORK_SSID, NETWORK_PASSWORD);
+      break;
+  }
+}
+
 float fscale(float originalMin, float originalMax, float newBegin, float newEnd, float inputValue, float curve)
 {
 
