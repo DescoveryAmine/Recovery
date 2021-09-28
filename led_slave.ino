@@ -253,17 +253,6 @@ void subscribe(String stagePropCode, uint8_t clientId) {
   udp.endPacket();
 }
 
-void receiveFrame() {
-  uint32_t ms = millis();
-
-  uint16_t packetSize = udp.parsePacket();
-  if (packetSize > 0) {
-    udp.read(packetBuffer, LED_BUFFER_SIZE);
-    adjustBrightness();
-    renderLeds(packetSize);
-    lastReceived = millis();
-  }
-}
 void connectToWiFi(const String ssid, const String pwd) {
   Serial.println("Connecting to network: " + ssid + "...");
   showStatus(STATUS_CONNECTING);

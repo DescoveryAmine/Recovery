@@ -1,5 +1,12 @@
+#include "constants.h"
+#include <ESP.h>
+
+#if defined(ESP8266)
+    #include <ESP8266WiFi.h>
+#elif defined(ESP32)
+    #include <WiFi.h>
+#endif
 #include <FastLED.h>
-#include <ESP8266WiFi.h>
 #include <WiFiUDP.h>
 #include "reactive_common.h"
 
@@ -37,12 +44,7 @@ void setup()
   /* WiFi Part */
   Serial.begin(115200);
   Serial.println();
-  Serial.print("Setting soft-AP ... ");
-  WiFi.persistent(false);
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP("sound_reactive", "123456789");
-  Serial.print("Soft-AP IP address = ");
-  Serial.println(WiFi.softAPIP());
+  setupWifi();
   UDP.begin(7171); 
   resetHeartBeats();
   waitForConnections();
@@ -93,6 +95,47 @@ void sendLedData(uint32_t data, uint8_t op_mode)
     UDP.write((char*)&send_data,sizeof(struct led_command));
     UDP.endPacket();
  }
+}
+
+void setupWifi() {
+  // AP mode password
+  const char WiFiAPPSK[] = "123456789";
+  //  // Set Hostname.
+    String hostname(soundreactive);
+  
+    uint64_t chipid = ESP.getEfuseMac();
+    uint16_t long1 = (unsigned long)((chipid & 0xFFFF0000) >> 16 );
+    uint16_t long2 = (unsigned long)((chipid & 0x0000FFFF));
+    String hex = String(long1, HEX) + String(long2, HEX); // six octets
+    hostname += hex;
+  
+    char hostnameChar[hostname.length() + 1];
+    memset(hostnameChar, 0, hostname.length() + 1);
+  
+    for (uint8_t i = 0; i < hostname.length(); i++)
+      hostnameChar[i] = hostname.charAt(i);
+  
+    WiFi.setHostname(hostnameChar);
+  
+    // Print hostname.
+    Serial.println("Hostname: " + hostname);
+  //  if (StMode)
+  //  {
+  //WiFi.mode(WIFI_STA);
+  //Serial.printf("Connecting to %s\n", ssid);
+  //if (String(WiFi.SSID()) != String(ssid)) {
+  //  WiFi.begin(ssid, password);
+  //}
+  //  }
+  //  else
+  //  {
+      WiFi.mode(WIFI_AP);
+      WiFi.softAP(hostnameChar, WiFiAPPSK);
+      Serial.printf("Connect to Wi-Fi access point: %s\n", hostnameChar);
+      Serial.println(WiFi.softAPIP());
+      //Serial.println("and open http://192.168.4.1 in your browser");
+  //  }
+
 }
 
 void waitForConnections() {
